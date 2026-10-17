@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -26,6 +28,16 @@ func getLogFilePath() string {
 		// fallback to /tmp for unknown OS
 		return "/tmp/paprika-3-mcp/server.log"
 	}
+}
+
+// getCachePath returns where the recipe cache is stored, one file per account
+func getCachePath(username string) string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(username))
+	return filepath.Join(dir, "paprika-3-mcp", fmt.Sprintf("recipes-%s.json", hex.EncodeToString(sum[:])[:12]))
 }
 
 func main() {
@@ -62,6 +74,8 @@ func main() {
 		Username: *username,
 		Password: *password,
 		Logger:   logger,
+		// Recipes only, never credentials
+		CachePath: getCachePath(*username),
 	})
 	if err != nil {
 		logger.Error("failed to start paprika-3-mcp server", "err", err)

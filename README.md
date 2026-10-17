@@ -19,10 +19,31 @@ See anything missing? Open an issue on this repo to request a feature!
 
 #### 🛠 **Tools**
 
+**Recipes**
+
+- `search_recipes`  
+  Search by name (`query`), `ingredient` and/or `category`. All given filters must match, and a category includes its subcategories. Returns one compact line per recipe: name, categories and uid.
+- `get_recipe`  
+  One recipe in full, by uid or name, including ingredients, directions and category names
+- `list_categories`  
+  All categories as a tree, with the number of recipes directly in each category and including its subcategories
 - `create_paprika_recipe`  
-  Allows Claude to save a new recipe to your Paprika app
+  Save a new recipe. Pass `categories` as names of existing categories; unknown names are rejected with suggestions and the recipe is not saved. **Categories are never created.**
 - `update_paprika_recipe`  
-  Allows Claude to modify an existing recipe
+  Modify an existing recipe. Only the fields you pass change; categories, photo, rating and the created date are kept.
+
+**Meal planner**
+
+- `list_meals`  
+  Meals between `start_date` and `end_date` (`YYYY-MM-DD`, inclusive, past or future), grouped per day with meal type and recipe name, or the free text for meals without a recipe
+- `add_meal`  
+  Put a recipe (`recipe`: uid or name) or free text (`name`) on a `date` with a `meal_type`. Meal types are matched against the ones defined in your Paprika account, including custom ones, and accept Dutch and English names (`ontbijt`/`breakfast`, `diner`/`dinner`, `nagerecht`/`dessert`, ...). A recipe name that matches several recipes is rejected with the candidates.
+
+Every write triggers a sync notification so the change shows up on your other devices. There are no delete tools, and grocery lists are not supported.
+
+#### ⚡ Caching
+
+Recipes and categories are cached in memory and in `~/Library/Caches/paprika-3-mcp/` (recipe data only, never credentials). A refresh only downloads recipes whose hash changed, so after the first load the cache stays in sync cheaply: in the background every 5 minutes, and before a tool reads it when it is more than a minute old. Downloads are limited to 3 at a time and a refresh stops early when the API starts failing, since paprikaapp.com throttles clients that send too many requests.
 
 ## ⚙️ Prerequisites
 
@@ -107,6 +128,10 @@ To add `paprika-3-mcp` to Claude, all you need to do is create another entry in 
 Restart Claude and you should see the MCP server tools after clicking on the hammerhead icon:
 
 ![MCP server running with Claude](docs/install.png)
+
+## 🙏 Acknowledgements
+
+This fork builds on fixes and research from the community: login encoding (#8), empty categories (#12), and the bulk meal endpoint and retry approach from [JoshTerAvest](https://github.com/JoshTerAvest/paprika-3-mcp) (#11). Meal types via `/sync/mealtypes` were inspired by [brendanjerwin's fork](https://github.com/brendanjerwin/paprika-3-mcp).
 
 ## 📄 License
 

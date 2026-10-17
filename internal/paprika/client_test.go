@@ -16,6 +16,9 @@ import (
 func TestClient(t *testing.T) {
 	username := os.Getenv("PAPRIKA_USERNAME")
 	password := os.Getenv("PAPRIKA_PASSWORD")
+	if username == "" || password == "" {
+		t.Skip("PAPRIKA_USERNAME and PAPRIKA_PASSWORD are required for integration tests")
+	}
 	client, err := paprika.NewClient(username, password, "dev", nil)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

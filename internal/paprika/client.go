@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"runtime"
 	"sort"
 	"strings"
@@ -38,6 +40,49 @@ func (r *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return r.transport.RoundTrip(req)
 }
 
+// retryTransport retries requests that fail with a network error, a 429 or a 5xx response.
+// paprikaapp.com drops connections intermittently; sync writes upsert by UID, so replaying a POST is safe.
+type retryTransport struct {
+	transport  http.RoundTripper
+	maxRetries int
+	baseDelay  time.Duration
+}
+
+func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Read the body upfront so it can be replayed on retries
+	var bodyBytes []byte
+	if req.Body != nil {
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		req.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("failed to read request body: %w", err)
+		}
+	}
+
+	for attempt := 0; ; attempt++ {
+		if bodyBytes != nil {
+			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		}
+
+		resp, err := t.transport.RoundTrip(req)
+		retryable := err != nil || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		if !retryable || attempt == t.maxRetries {
+			return resp, err
+		}
+		if resp != nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-time.After(t.baseDelay * (1 << attempt)):
+		}
+	}
+}
+
 func userAgent(version string) string {
 	return fmt.Sprintf("paprika-3-mcp/%s (golang; %s)", version, runtime.Version())
 }
@@ -54,26 +99,33 @@ func NewClient(username, password, version string, logger *slog.Logger) (*Client
 		},
 		ResponseHeaderTimeout: 10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		// Over TLS 1.3, paprikaapp.com often never answers the first request on a new connection from Go's
+		// TLS stack, so requests time out awaiting response headers. TLS 1.2 doesn't have this problem.
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS12},
 	}
 	client := &http.Client{
-		Transport: t,
-		Timeout:   10 * time.Second,
+		Transport: &retryTransport{transport: t, maxRetries: 3, baseDelay: 500 * time.Millisecond},
+		Timeout:   30 * time.Second,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	token, err := login(ctx, *client, username, password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to login: %w", err)
 	}
 
-	client.Transport = &roundTripper{
-		transport: t,
-		headers: map[string]string{
-			"Accept":        "*/*",
-			"Authorization": fmt.Sprintf("Bearer %s", token),
-			"Connection":    "keep-alive",
-			"User-Agent":    userAgent(version),
+	client.Transport = &retryTransport{
+		maxRetries: 3,
+		baseDelay:  500 * time.Millisecond,
+		transport: &roundTripper{
+			transport: t,
+			headers: map[string]string{
+				"Accept":        "*/*",
+				"Authorization": fmt.Sprintf("Bearer %s", token),
+				"Connection":    "keep-alive",
+				"User-Agent":    userAgent(version),
+			},
 		},
 	}
 
@@ -109,7 +161,8 @@ type errorResponse struct {
 // login authenticates with the Paprika API and returns an authentication token
 // The token is used for all subsequent requests to the API. As far as I can tell, this is a JWT with no expiration.
 func login(ctx context.Context, client http.Client, username, password string) (string, error) {
-	body := fmt.Sprintf("email=%s&password=%s", username, password)
+	// Credentials must be form-encoded, otherwise passwords containing reserved characters like & + % = get mangled
+	body := url.Values{"email": {username}, "password": {password}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://paprikaapp.com/api/v1/account/login", bytes.NewBufferString(body))
 	if err != nil {
 		return "", err
@@ -265,10 +318,12 @@ func (r *Recipe) ToMarkdown() string {
 
 	if r.Directions != "" {
 		sb.WriteString("## Directions\n")
-		lines := strings.Split(strings.TrimSpace(r.Directions), "\n")
-		for i, line := range lines {
-			if line != "" {
-				sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, line))
+		// Number only non-empty lines; directions often have blank lines between steps
+		step := 0
+		for _, line := range strings.Split(strings.TrimSpace(r.Directions), "\n") {
+			if line = strings.TrimSpace(line); line != "" {
+				step++
+				sb.WriteString(fmt.Sprintf("%d. %s\n", step, line))
 			}
 		}
 		sb.WriteString("\n")
@@ -293,6 +348,10 @@ func (r *Recipe) generateUUID() {
 }
 
 func (r *Recipe) updateCreated() {
+	// Keep the original timestamp when updating an existing recipe
+	if r.Created != "" {
+		return
+	}
 	layout := "2006-01-02 15:04:05"
 	r.Created = time.Now().Format(layout)
 }
@@ -344,8 +403,8 @@ func (r *Recipe) updateHash() error {
 	return nil
 }
 
-func (r *Recipe) asGzip() ([]byte, error) {
-	jsonBytes, err := json.Marshal(r)
+func gzipJSON(v interface{}) ([]byte, error) {
+	jsonBytes, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
@@ -413,6 +472,11 @@ func (c *Client) DeleteRecipe(ctx context.Context, recipe Recipe) (*Recipe, erro
 // SaveRecipe saves a recipe to the Paprika API. If the recipe already exists, it will be updated.
 // If the recipe does not exist, it will be created.
 func (c *Client) SaveRecipe(ctx context.Context, recipe Recipe) (*Recipe, error) {
+	// A nil slice marshals to null, which breaks the Paprika apps' sync with
+	// "Value cannot be null. Parameter name: collection." (issue #7)
+	if recipe.Categories == nil {
+		recipe.Categories = []string{}
+	}
 	// set the created timestamp
 	recipe.updateCreated()
 	// generate a new UUID if one doesn't exist
@@ -422,66 +486,85 @@ func (c *Client) SaveRecipe(ctx context.Context, recipe Recipe) (*Recipe, error)
 		return nil, err
 	}
 
-	// gzip the recipe
-	fileData, err := recipe.asGzip()
-	if err != nil {
-		return nil, err
+	if err := c.postV2(ctx, fmt.Sprintf("https://paprikaapp.com/api/v2/sync/recipe/%s/", recipe.UID), &recipe); err != nil {
+		c.logger.Error("failed to save recipe", "error", err)
+		return nil, fmt.Errorf("failed to save recipe: %w", err)
 	}
 
-	// Create a multipart form request
+	defer c.notify(ctx)
+
+	return &recipe, nil
+}
+
+// postV2 sends v as gzipped JSON in a multipart form, which is how the sync API expects writes
+func (c *Client) postV2(ctx context.Context, endpoint string, v interface{}) error {
+	fileData, err := gzipJSON(v)
+	if err != nil {
+		return err
+	}
+
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("data", "data")
 	if err != nil {
-		c.logger.Error("failed to create form file", "error", err)
-		return nil, err
+		return fmt.Errorf("failed to create form file: %w", err)
 	}
-
-	// Write the gzipped JSON data to the form file
 	if _, err := part.Write(fileData); err != nil {
-		c.logger.Error("failed to write gzipped JSON data", "error", err)
-		return nil, err
+		return fmt.Errorf("failed to write gzipped JSON data: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		c.logger.Error("failed to close multipart writer", "error", err)
-		return nil, err
+		return fmt.Errorf("failed to close multipart writer: %w", err)
 	}
 
-	// Create the HTTP request
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("https://paprikaapp.com/api/v2/sync/recipe/%s/", recipe.UID), &body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)
 	if err != nil {
-		c.logger.Error("failed to create request", "error", err)
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.ContentLength = int64(body.Len())
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		c.logger.Error("failed to create recipe", "error", err)
-		return nil, err
+		return err
+	}
+	defer resp.Body.Close()
+
+	rawBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status %s: %s", resp.Status, string(rawBytes))
+	}
+
+	return isErrorResponse(rawBytes)
+}
+
+// getResult performs a GET on a sync endpoint and unmarshals the response into v,
+// which should be a struct with a Result field
+func (c *Client) getResult(ctx context.Context, endpoint string, v interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		c.logger.Error("failed to create recipe", "status", resp.Status)
-		return nil, fmt.Errorf("failed to create recipe: %s", resp.Status)
+		return fmt.Errorf("unexpected status %s", resp.Status)
 	}
 
 	rawBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.logger.Error("failed to read response body", "error", err)
-		return nil, err
+		return err
 	}
 
-	if err := isErrorResponse(rawBytes); err != nil {
-		c.logger.Error("failed to create recipe", "error", err)
-		return nil, err
-	}
-
-	defer c.notify(ctx)
-
-	return &recipe, nil
+	return json.Unmarshal(rawBytes, v)
 }
 
 // notify sends a POST to /v2/sync/notify, which tells all Paprika clients to sync.
