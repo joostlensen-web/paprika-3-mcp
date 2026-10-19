@@ -117,13 +117,23 @@ To add `paprika-3-mcp` to Claude, all you need to do is create another entry in 
       "args": [
         "--username",
         "<your paprika 3 username (usually email)>",
-        "--password",
-        "<your paprika 3 password>"
+        "--keychain-service",
+        "paprika-mcp"
       ]
     }
   }
 }
 ```
+
+### 🔐 Keeping your password out of config files and `ps`
+
+On macOS, store the password in the keychain once:
+
+```sh
+security add-generic-password -s paprika-mcp -a "<your paprika 3 username>" -w
+```
+
+With `--keychain-service paprika-mcp` the server reads it itself, so it never appears in a config file, a script or a process listing. On other platforms, set the `PAPRIKA_PASSWORD` environment variable instead. The `--password` flag still works but is visible to every local process via `ps`, so avoid it.
 
 Restart Claude and you should see the MCP server tools after clicking on the hammerhead icon:
 

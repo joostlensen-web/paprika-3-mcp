@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"time"
 
 	"github.com/soggycactus/paprika-3-mcp/internal/mcpserver"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -40,9 +45,37 @@ func getCachePath(username string) string {
 	return filepath.Join(dir, "paprika-3-mcp", fmt.Sprintf("recipes-%s.json", hex.EncodeToString(sum[:])[:12]))
 }
 
+// readKeychain is replaced in tests
+var readKeychain = func(ctx context.Context, service string) (string, error) {
+	// The password reaches us through stdout, so it never shows up in a process listing
+	out, err := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password", "-s", service, "-w").Output()
+	if err != nil {
+		return "", fmt.Errorf("reading keychain item %q: %w", service, err)
+	}
+	return strings.TrimRight(string(out), "\r\n"), nil
+}
+
+// resolvePassword picks the password from the macOS keychain, the PAPRIKA_PASSWORD environment variable
+// or the --password flag, in that order. The flag is visible to every local process via ps; avoid it.
+func resolvePassword(keychainService, flagPassword string) (string, error) {
+	if keychainService != "" {
+		if runtime.GOOS != "darwin" {
+			return "", errors.New("--keychain-service is only supported on macOS")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return readKeychain(ctx, keychainService)
+	}
+	if env := os.Getenv("PAPRIKA_PASSWORD"); env != "" {
+		return env, nil
+	}
+	return flagPassword, nil
+}
+
 func main() {
 	username := flag.String("username", "", "Paprika 3 username (email)")
-	password := flag.String("password", "", "Paprika 3 password")
+	password := flag.String("password", "", "Paprika 3 password (deprecated: visible in process listings, use --keychain-service or PAPRIKA_PASSWORD)")
+	keychainService := flag.String("keychain-service", "", "macOS keychain service name holding the Paprika 3 password (generic password item)")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -51,7 +84,12 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *username == "" || *password == "" {
+	pw, err := resolvePassword(*keychainService, *password)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if *username == "" || pw == "" {
 		fmt.Fprintln(os.Stderr, "username and password are required")
 		os.Exit(1)
 	}
@@ -72,7 +110,7 @@ func main() {
 	s, err := mcpserver.NewServer(mcpserver.NewServerOptions{
 		Version:  version,
 		Username: *username,
-		Password: *password,
+		Password: pw,
 		Logger:   logger,
 		// Recipes only, never credentials
 		CachePath: getCachePath(*username),
