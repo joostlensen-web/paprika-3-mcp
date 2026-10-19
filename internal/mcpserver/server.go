@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -59,6 +60,7 @@ const (
 	writeTimeout = 30 * time.Second
 )
 
+// Start serves MCP over stdio
 func (s *Server) Start() {
 	go s.updateResources()
 
@@ -67,6 +69,20 @@ func (s *Server) Start() {
 	if err := server.ServeStdio(s.server); err != nil {
 		s.logger.Error("Server error", "err", err)
 	}
+}
+
+// HTTPHandler serves MCP over streamable HTTP, for hosting the server remotely.
+// It is stateless, so every request can land on a different instance. The caller is responsible for authentication.
+func (s *Server) HTTPHandler() http.Handler {
+	go s.updateResources()
+
+	s.server.AddTools(s.tools()...)
+
+	return server.NewStreamableHTTPServer(s.server,
+		server.WithStateLess(true),
+		// Hosting proxies may connect over loopback with the public Host header, which this check would reject
+		server.WithDisableLocalhostProtection(true),
+	)
 }
 
 func (s *Server) tools() []server.ServerTool {
@@ -204,19 +220,19 @@ func stringSliceArg(args map[string]interface{}, key string) []string {
 
 func (s *Server) createRecipe(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start := time.Now()
-	name, ok := req.Params.Arguments["name"].(string)
+	name, ok := req.GetArguments()["name"].(string)
 	if !ok || len(name) == 0 {
 		return nil, errors.New("name is required")
 	}
-	ingredients, ok := req.Params.Arguments["ingredients"].(string)
+	ingredients, ok := req.GetArguments()["ingredients"].(string)
 	if !ok || len(ingredients) == 0 {
 		return nil, errors.New("ingredients are required")
 	}
-	directions, ok := req.Params.Arguments["directions"].(string)
+	directions, ok := req.GetArguments()["directions"].(string)
 	if !ok || len(directions) == 0 {
 		return nil, errors.New("directions are required")
 	}
-	args := req.Params.Arguments
+	args := req.GetArguments()
 
 	// Categories are resolved before anything is saved, so an unknown category never leaves a half-created recipe
 	readCtx, cancel := context.WithTimeout(ctx, readTimeout)
@@ -259,7 +275,7 @@ func (s *Server) createRecipe(ctx context.Context, req mcp.CallToolRequest) (*mc
 
 func (s *Server) updateRecipe(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start := time.Now()
-	args := req.Params.Arguments
+	args := req.GetArguments()
 	uid, ok := args["uid"].(string)
 	if !ok || len(uid) == 0 {
 		return nil, errors.New("uid is required")

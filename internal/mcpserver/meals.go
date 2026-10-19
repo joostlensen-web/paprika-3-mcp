@@ -17,7 +17,7 @@ const dateLayout = "2006-01-02"
 const maxListedMeals = 500
 
 func (s *Server) listMeals(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.Params.Arguments
+	args := req.GetArguments()
 	startDate, err := time.Parse(dateLayout, strings.TrimSpace(stringArg(args, "start_date")))
 	if err != nil {
 		return mcp.NewToolResultError("start_date must be a date in the format YYYY-MM-DD"), nil
@@ -138,7 +138,7 @@ func formatMeals(meals []paprika.Meal, mealTypes []paprika.MealType, recipes []p
 
 func (s *Server) addMeal(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	start := time.Now()
-	args := req.Params.Arguments
+	args := req.GetArguments()
 	date, err := time.Parse(dateLayout, strings.TrimSpace(stringArg(args, "date")))
 	if err != nil {
 		return mcp.NewToolResultError("date must be a date in the format YYYY-MM-DD"), nil

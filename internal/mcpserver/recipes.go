@@ -13,7 +13,7 @@ import (
 const defaultSearchLimit = 100
 
 func (s *Server) searchRecipes(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.Params.Arguments
+	args := req.GetArguments()
 	query := fold(stringArg(args, "query"))
 	ingredient := fold(stringArg(args, "ingredient"))
 	categoryName := strings.TrimSpace(stringArg(args, "category"))
@@ -93,7 +93,7 @@ func formatRecipeLine(r paprika.Recipe, ix *categoryIndex) string {
 }
 
 func (s *Server) getRecipe(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	ref := strings.TrimSpace(stringArg(req.Params.Arguments, "recipe"))
+	ref := strings.TrimSpace(stringArg(req.GetArguments(), "recipe"))
 	if ref == "" {
 		return mcp.NewToolResultError("recipe is required"), nil
 	}

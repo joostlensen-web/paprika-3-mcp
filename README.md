@@ -139,6 +139,22 @@ Restart Claude and you should see the MCP server tools after clicking on the ham
 
 ![MCP server running with Claude](docs/install.png)
 
+## ☁️ Hosting it remotely (Vercel)
+
+To use the server from Claude on your phone or on the web, host it as a remote MCP server. `cmd/server` serves MCP over streamable HTTP and is configured with environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `PAPRIKA_USERNAME` | Your Paprika 3 email |
+| `PAPRIKA_PASSWORD` | Your Paprika 3 password (mark it **Sensitive**) |
+| `MCP_SECRET` | A random string of at least 32 characters, e.g. from `openssl rand -hex 32` (mark it **Sensitive**) |
+
+On Vercel, import the repository as a project. `vercel.json` selects the Go preset, which builds `cmd/server`. Add the variables under **Settings → Environment Variables** and redeploy.
+
+The server only answers on `https://<your-project>.vercel.app/mcp/<MCP_SECRET>`; every other path returns 404. In Claude, add that URL under **Settings → Connectors → Add custom connector**. Connectors added on claude.ai are also available in the mobile apps. Anyone who has the URL can read and change your recipes and meal plan, so treat it like a password, and change `MCP_SECRET` if it leaks.
+
+The recipe cache lives in memory and in the instance's temp dir, so the first search after a cold start fetches all recipes again (about 30 seconds for 600 recipes).
+
 ## 🙏 Acknowledgements
 
 This fork builds on fixes and research from the community: login encoding (#8), empty categories (#12), and the bulk meal endpoint and retry approach from [JoshTerAvest](https://github.com/JoshTerAvest/paprika-3-mcp) (#11). Meal types via `/sync/mealtypes` were inspired by [brendanjerwin's fork](https://github.com/brendanjerwin/paprika-3-mcp).
